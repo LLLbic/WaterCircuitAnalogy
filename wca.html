@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>三维水阀电路模拟</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load OrbitControls for interactive camera control (zoom, orbit, pan) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #f0f4f8; }
+        canvas { display: block; }
+        #canvas-container { width: 100vw; height: 100vh; position: relative; }
+        /* Custom styles for better 3D look */
+        .component-label {
+            background: rgba(45, 55, 72, 0.8);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            pointer-events: none; /* Ignore mouse events */
+            position: absolute;
+            transform: translate(-50%, -50%);
+            white-space: nowrap;
+        }
+        .measurement-card {
+            min-width: 180px;
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(5px);
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <!-- Overlay for controls and title -->
+        <div class="absolute top-0 left-0 w-full p-4 flex justify-between items-start z-10">
+            <h1 class="text-3xl font-extrabold text-gray-800 bg-white/70 backdrop-blur-sm p-3 rounded-xl shadow-lg">
+                水阀环路电路模拟 (Water-Circuit Analogy)
+            </h1>
+        </div>
+
+        <!-- Measurement Displays (Top Right) -->
+        <div class="absolute top-4 right-4 z-20 flex flex-col space-y-2">
+            <div id="flowInfo" class="measurement-card p-3 rounded-xl shadow-md text-sm font-mono text-blue-600">当前电流 (I): 0.50 A (模拟)</div>
+            <!-- Updated label content to reflect V controlling drift speed -->
+            <div id="velocityInfo" class="measurement-card p-3 rounded-xl shadow-md text-sm font-mono text-green-700">粒子漂移速度 (V 驱动): 0.00 unit/s (模拟)</div>
+            <div id="turbineInfo" class="measurement-card p-3 rounded-xl shadow-md text-sm font-mono text-orange-600">水轮转速 (RPM): 0 (模拟)</div>
+        </div>
+
+
+        <!-- Control Panel (Bottom Right) -->
+        <div class="absolute bottom-4 right-4 bg-white p-6 rounded-xl shadow-2xl z-20 w-80">
+            <h2 class="text-xl font-semibold text-gray-700 mb-3">环路控制</h2>
+
+            <!-- Pump Power Slider -->
+            <div class="mb-4 pb-2 border-b">
+                <h3 class="font-bold text-gray-600 mb-2">水泵功率 (Voltage) - 驱动流速</h3>
+                <label for="pumpPowerRange" class="block text-sm font-medium text-gray-500 mb-1">泵压力/电压 (V):</label>
+                <!-- INCREASED MAX TO 2 AND SET DEFAULT TO 1.0 -->
+                <input type="range" id="pumpPowerRange" min="0" max="2" value="1.0" step="0.01" class="w-full h-2 bg-red-100 rounded-lg appearance-none cursor-pointer range-lg">
+                <div class="flex justify-between text-xs mt-1 text-gray-500">
+                    <span>速度 0 (0V)</span>
+                    <span>最大速度 (Max V x 2)</span>
+                </div>
+            </div>
+            
+            <!-- Valve Control Slider -->
+            <div class="mb-4">
+                <h3 class="font-bold text-gray-600 mb-2">阀门控制 (Resistance) - 驱动水量/密度</h3>
+                <label for="valveRange" class="block text-sm font-medium text-gray-500 mb-1">阀门开度/导纳 (1/R):</label>
+                <input type="range" id="valveRange" min="0" max="1" value="0.5" step="0.01" class="w-full h-2 bg-blue-100 rounded-lg appearance-none cursor-pointer range-lg">
+                <div class="flex justify-between text-xs mt-1 text-gray-500">
+                    <span>极低密度 (Infinite R)</span>
+                    <span>最大密度 (Low R)</span>
+                </div>
+            </div>
+
+            <!-- Pause Button -->
+            <button id="pauseButton" class="w-full py-2 mt-2 font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md">
+                暂停/继续模拟
+            </button>
+            
+            <p class="text-xs text-gray-400 mt-3 border-t pt-2">
+                <span class="font-bold">类比:</span> 欧姆定律 I = V / R
+            </p>
+            <p class="text-xs text-gray-400 mt-2">
+                <span class="font-bold">控制:</span> 鼠标左键旋转，滚轮缩放。
+            </p>
+        </div>
+    </div>
+
+    <script type="module">
+        let scene, camera, renderer, controls; 
+        let curve, particles = [], particleGroup;
+        
+        // UPDATED INITIAL VALUE
+        let pumpPower = 1.0; // Voltage (V)
+        let valveOpening = 0.5; // Inverse Resistance (1/R)
+        let flowRate = 0.5; // Calculated Current (I) = V * (1/R) (Scaled)
+        let isPaused = false; 
+
+        const NUM_PARTICLES = 750; 
+        const BASE_FLOW_SPEED = 0.005; // Base speed factor
+        const pipeRadius = 0.2;
+        const PARTICLE_COLOR = 0x0040ff; 
+        const FIXED_RADIUS_FOR_SCATTER = pipeRadius * 0.8; 
+        
+        // Decoupling Constants
+        const MAX_DENSITY_STEP = 30; // 1 (max density) to 30 (min density)
+
+        let valveHandleMesh; 
+        let turbineMesh; 
+        let gateMeshRef; // Reference to the gate mesh
+        
+        // UI Element References
+        const container = document.getElementById('canvas-container');
+        const pumpPowerRange = document.getElementById('pumpPowerRange');
+        const valveRange = document.getElementById('valveRange');
+        const flowInfo = document.getElementById('flowInfo');
+        const velocityInfo = document.getElementById('velocityInfo');
+        const turbineInfo = document.getElementById('turbineInfo');
+        const pauseButton = document.getElementById('pauseButton'); 
+
+        // --- 1. Scene Setup ---
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf0f4f8);
+            
+            // Camera (Perspective)
+            camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 100);
+            camera.position.set(10, 8, 10);
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 10, 5);
+            directionalLight.castShadow = true; 
+            scene.add(directionalLight);
+            
+            // Ground
+            const groundGeometry = new THREE.PlaneGeometry(30, 30);
+            const groundMaterial = new THREE.MeshStandardMaterial({ color: 0xe0e6ed, roughness: 0.8, metalness: 0.1 });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = -pipeRadius - 0.1; 
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Create the path, components, and particles
+            createCircuit();
+            
+            // Interaction
+            setupInteraction();
+
+            // Initialize OrbitControls for manual camera control
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; 
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 5; 
+            controls.maxDistance = 25; 
+
+            // Start animation loop
+            animate();
+            
+            // Handle resizing
+            window.addEventListener('resize', onWindowResize, false);
+            onWindowResize(); 
+        }
+
+        function onWindowResize() {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+        
+        // --- 2. Circuit Component Creation ---
+
+        function createCircuit() {
+            const points = [
+                new THREE.Vector3(-6, 0, 6), new THREE.Vector3(6, 0, 6),
+                new THREE.Vector3(6, 0, -6), new THREE.Vector3(-6, 0, -6),
+                new THREE.Vector3(-6, 0, 6),
+            ];
+
+            const pathSegments = [];
+            for (let i = 0; i < points.length - 1; i++) {
+                pathSegments.push(new THREE.LineCurve3(points[i], points[i + 1]));
+            }
+            
+            curve = new THREE.CurvePath();
+            pathSegments.forEach(segment => curve.add(segment));
+            
+            // --- Pipes (Wires) ---
+            const tubeGeometry = new THREE.TubeGeometry(curve, 100, pipeRadius, 8, true);
+            const pipeMaterial = new THREE.MeshStandardMaterial({
+                color: 0x87ceeb, 
+                metalness: 0.3,
+                roughness: 0.5,
+                transparent: true,
+                opacity: 0.4 
+            });
+            const pipeMesh = new THREE.Mesh(tubeGeometry, pipeMaterial);
+            pipeMesh.castShadow = true;
+            pipeMesh.receiveShadow = true;
+            scene.add(pipeMesh);
+
+            // --- Pump (Voltage Source) ---
+            const pumpPosition = new THREE.Vector3().lerpVectors(points[3], points[0], 0.5);
+            createPump(pumpPosition, '水泵 (Voltage Source)'); 
+
+            // --- Valve (Resistor) ---
+            const valvePosition = new THREE.Vector3().lerpVectors(points[1], points[2], 0.5);
+            createValve(valvePosition, '阀门 (Resistor)'); 
+
+            // --- Turbine (Load) ---
+            const turbinePosition = new THREE.Vector3().lerpVectors(points[2], points[3], 0.5);
+            createTurbine(turbinePosition); 
+
+            // --- Fluid Particles (Current) ---
+            createParticles(curve);
+        }
+        
+        function createPump(position, label) {
+            const pumpGroup = new THREE.Group();
+            pumpGroup.position.copy(position);
+
+            // Main body of the pump (transparent)
+            const bodyGeometry = new THREE.CylinderGeometry(pipeRadius * 2, pipeRadius * 2, 1.2, 16);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x007bff, 
+                metalness: 0.7, 
+                roughness: 0.3,
+                transparent: true,
+                opacity: 0.4 
+            });
+            const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            bodyMesh.castShadow = true;
+            bodyMesh.receiveShadow = true;
+            pumpGroup.add(bodyMesh);
+            
+            // Impeller mechanism
+            const impellerGroup = new THREE.Group();
+            const hubGeometry = new THREE.CylinderGeometry(0.1, 0.1, 1.2, 8);
+            const hubMaterial = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9, roughness: 0.1 });
+            const hub = new THREE.Mesh(hubGeometry, hubMaterial);
+            impellerGroup.add(hub);
+
+            const vaneGeometry = new THREE.BoxGeometry(0.05, 1.2, 0.4);
+            const vaneMaterial = new THREE.MeshStandardMaterial({ color: 0x4ddbff, metalness: 0.8, roughness: 0.2 });
+
+            for (let i = 0; i < 4; i++) {
+                const vane = new THREE.Mesh(vaneGeometry, vaneMaterial);
+                const angle = i * (Math.PI / 2);
+                vane.rotation.y = angle; 
+                vane.castShadow = true;
+                impellerGroup.add(vane);
+            }
+            
+            impellerGroup.rotation.y = Math.PI / 2; 
+            pumpGroup.add(impellerGroup);
+            pumpGroup.userData.impeller = impellerGroup; 
+
+            // Inlet/Outlet nozzles 
+            const nozzleGeometry = new THREE.CylinderGeometry(pipeRadius, pipeRadius, 0.2, 8); 
+            const nozzleMaterial = new THREE.MeshStandardMaterial({ color: 0x0056b3, metalness: 0.8, roughness: 0.2 });
+
+            const nozzle1 = new THREE.Mesh(nozzleGeometry, nozzleMaterial);
+            nozzle1.position.set(0, -0.7, 0); 
+            nozzle1.castShadow = true;
+            nozzle1.receiveShadow = true;
+            pumpGroup.add(nozzle1);
+
+            const nozzle2 = new THREE.Mesh(nozzleGeometry, nozzleMaterial);
+            nozzle2.position.set(0, 0.7, 0); 
+            nozzle2.castShadow = true;
+            nozzle2.receiveShadow = true;
+            pumpGroup.add(nozzle2);
+
+            pumpGroup.rotation.z = Math.PI / 2;
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'component-label';
+            labelDiv.textContent = label;
+            labelDiv.id = `label-${label.split(' ')[0]}`;
+            container.appendChild(labelDiv);
+            pumpGroup.userData.label = labelDiv;
+
+            scene.add(pumpGroup);
+        }
+
+        function createValve(position, label) {
+            const valveGroup = new THREE.Group();
+            valveGroup.position.copy(position);
+
+            // Main valve body (TRANSPARENT RED)
+            const bodyGeometry = new THREE.BoxGeometry(pipeRadius * 3, 0.8, pipeRadius * 3);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xdc3545, 
+                metalness: 0.8, 
+                roughness: 0.2,
+                transparent: true, 
+                opacity: 0.4 
+            });
+            const valveBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            valveBody.castShadow = true;
+            valveBody.receiveShadow = true;
+            valveGroup.add(valveBody);
+            
+            // Valve Gate (The physical obstruction)
+            const gateWidth = pipeRadius * 2.2; 
+            const gateHeight = pipeRadius * 2.5; 
+            const gateGeometry = new THREE.BoxGeometry(gateWidth, gateHeight, 0.05); 
+            const gateMaterial = new THREE.MeshStandardMaterial({ color: 0x861c28, metalness: 0.9, roughness: 0.1 });
+            const gateMesh = new THREE.Mesh(gateGeometry, gateMaterial);
+            gateMesh.castShadow = true;
+            gateMesh.receiveShadow = true;
+            
+            valveGroup.userData.gate = gateMesh; 
+            gateMeshRef = gateMesh; // Store reference to the gate mesh for animation
+            valveGroup.add(gateMesh);
+
+
+            // Connectors to the pipe 
+            const connectorGeometry = new THREE.CylinderGeometry(pipeRadius, pipeRadius, 0.2, 8); 
+            const connectorMaterial = new THREE.MeshStandardMaterial({ color: 0x861c28, metalness: 0.7, roughness: 0.3 });
+
+            const connector1 = new THREE.Mesh(connectorGeometry, connectorMaterial);
+            connector1.position.z = -pipeRadius * 1.6; 
+            connector1.rotation.x = Math.PI / 2;
+            connector1.castShadow = true;
+            valveGroup.add(connector1);
+
+            const connector2 = new THREE.Mesh(connectorGeometry, connectorMaterial);
+            connector2.position.z = pipeRadius * 1.6;
+            connector2.rotation.x = Math.PI / 2;
+            connector2.castShadow = true;
+            valveGroup.add(connector2);
+
+
+            // Valve stem and handle
+            const stemGeometry = new THREE.CylinderGeometry(0.1, 0.1, 0.7, 8); 
+            const stemMaterial = new THREE.MeshStandardMaterial({ color: 0x6c757d, metalness: 0.9, roughness: 0.1 });
+            const stemMesh = new THREE.Mesh(stemGeometry, stemMaterial);
+            stemMesh.position.y = 0.75; 
+            stemMesh.castShadow = true;
+            valveGroup.add(stemMesh);
+
+            const handleGeometry = new THREE.TorusGeometry(0.3, 0.05, 8, 16); 
+            const handleMaterial = new THREE.MeshStandardMaterial({ color: 0x495057, metalness: 0.9, roughness: 0.1 });
+            valveHandleMesh = new THREE.Mesh(handleGeometry, handleMaterial); 
+            valveHandleMesh.position.y = 1.1; 
+            valveHandleMesh.rotation.x = Math.PI / 2; 
+            valveHandleMesh.castShadow = true;
+            valveGroup.add(valveHandleMesh);
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'component-label';
+            labelDiv.textContent = label;
+            container.appendChild(labelDiv);
+            valveGroup.userData.label = labelDiv;
+
+            scene.add(valveGroup);
+        }
+
+        function createTurbine(position) {
+            const turbineGroup = new THREE.Group();
+            turbineGroup.position.copy(position);
+
+            const hubGeometry = new THREE.CylinderGeometry(0.2, 0.2, 0.2, 16);
+            const hubMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5568, metalness: 0.9, roughness: 0.2 });
+            turbineGroup.add(new THREE.Mesh(hubGeometry, hubMaterial));
+
+            const bladeMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xffa500, 
+                metalness: 0.5, 
+                roughness: 0.5,
+                side: THREE.DoubleSide
+            });
+            
+            const numBlades = 4;
+            for (let i = 0; i < numBlades; i++) {
+                const bladeGeometry = new THREE.BoxGeometry(0.05, 0.6, 1.2); 
+                const blade = new THREE.Mesh(bladeGeometry, bladeMaterial);
+                const angle = (i / numBlades) * Math.PI * 2;
+                blade.position.set(0.4 * Math.cos(angle), 0, 0.4 * Math.sin(angle));
+                blade.rotation.y = angle; 
+                turbineGroup.add(blade);
+            }
+            
+            const label = '水轮机 (Load)';
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'component-label';
+            labelDiv.textContent = label;
+            container.appendChild(labelDiv);
+            
+            turbineGroup.userData.label = labelDiv;
+            
+            turbineMesh = turbineGroup; 
+            scene.add(turbineGroup);
+        }
+
+
+        // --- 3. Particle System (Cross-section Flow) ---
+
+        function createParticles(path) {
+            particleGroup = new THREE.Group();
+            const particleGeometry = new THREE.SphereGeometry(pipeRadius / 6, 8, 8); 
+            const particleMaterial = new THREE.MeshPhongMaterial({ 
+                color: PARTICLE_COLOR, 
+                emissive: PARTICLE_COLOR, 
+                emissiveIntensity: 0.5 
+            }); 
+
+            for (let i = 0; i < NUM_PARTICLES; i++) {
+                const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+                const t = i / NUM_PARTICLES;
+                
+                const angle = Math.random() * Math.PI * 2;
+                const radialDist = Math.random() * FIXED_RADIUS_FOR_SCATTER;
+
+                particle.userData.radialX = Math.cos(angle) * radialDist;
+                particle.userData.radialY = Math.sin(angle) * radialDist;
+
+                particle.userData.t = t;
+                particles.push(particle);
+                particleGroup.add(particle);
+            }
+            scene.add(particleGroup);
+        }
+
+        // --- 4. Animation Loop ---
+
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // Controls update should always run to allow camera movement even when paused
+            controls.update();
+
+            // Only run simulation logic if not paused
+            if (!isPaused) {
+                // 1. Calculate TRUE Flow Rate (Ohm's Law Analogy: I = V / R) for Physical Effects
+                const maxFlow = 1.0;
+                // pumpPower now ranges from 0 to 2
+                let calculatedFlowRate = pumpPower * valveOpening * maxFlow;
+                calculatedFlowRate = Math.max(0, calculatedFlowRate);
+                flowRate = calculatedFlowRate; // This is the TRUE current (I)
+
+                // 2. Determine Visual Factors (DECOUPLED AS REQUESTED)
+                
+                // V -> Speed: Visual speed is directly proportional to Pump Power (V)
+                // Speed scales linearly with pumpPower (0 to 2)
+                const visualSpeedFactor = pumpPower * BASE_FLOW_SPEED * 3; 
+
+                // 1/R -> Density: Visual density is inversely proportional to Valve Opening (1/R)
+                let currentDensityStep = Math.round(MAX_DENSITY_STEP - (valveOpening * (MAX_DENSITY_STEP - 1)));
+                currentDensityStep = Math.max(1, currentDensityStep); // 1 (max density) to MAX_DENSITY_STEP (min density)
+                
+                // 3. Update Measurements
+                // Velocity calculation also scales with pumpPower (0 to 2)
+                const displayVelocity = pumpPower * BASE_FLOW_SPEED * 1000 * 3;
+                const turbineAngularSpeed = flowRate * 0.05; 
+                const turbineRPM = (turbineAngularSpeed * 60) * (30 / Math.PI); 
+
+                flowInfo.textContent = `当前电流 (I): ${flowRate.toFixed(2)} A (模拟)`;
+                // Updated label content
+                velocityInfo.textContent = `粒子漂移速度 (V 驱动): ${displayVelocity.toFixed(2)} unit/s (模拟)`;
+                turbineInfo.textContent = `水轮转速 (RPM): ${turbineRPM.toFixed(0)} (模拟)`; 
+
+                // 4. Animate Particles (Movement uses V, Visibility uses 1/R)
+                particles.forEach((particle, index) => {
+                    // Movement driven by Pump Power (V)
+                    particle.userData.t += visualSpeedFactor; 
+                    particle.userData.t %= 1.0;
+                    
+                    // Visibility controlled by Valve Opening (1/R)
+                    particle.visible = (index % currentDensityStep === 0);
+                    
+                    const position = curve.getPoint(particle.userData.t);
+                    const tangent = curve.getTangent(particle.userData.t).normalize();
+                    
+                    // Determine the plane perpendicular to the pipe tangent (cross-section)
+                    const up = new THREE.Vector3(0, 1, 0);
+                    const normal1 = new THREE.Vector3().crossVectors(tangent, up).normalize();
+                    const normal2 = new THREE.Vector3().crossVectors(tangent, normal1).normalize();
+
+                    // Apply radial offset using the two normal vectors
+                    const offsetVector = normal1.clone().multiplyScalar(particle.userData.radialX)
+                        .add(normal2.clone().multiplyScalar(particle.userData.radialY));
+
+                    // Final position: Centerline point + cross-section offset
+                    particle.position.copy(position).add(offsetVector);
+                });
+                
+                // 5. Animate Components (Driven by TRUE Flow Rate/Pump Power)
+                
+                // Turbine (I/FlowRate drives rotation speed)
+                if (turbineMesh) {
+                    turbineMesh.rotation.y += turbineAngularSpeed; 
+                }
+
+                // Valve Handle and Gate (1/R/ValveOpening drives position)
+                if (valveHandleMesh) {
+                    const targetRotation = (1 - valveOpening) * -Math.PI * 2; 
+                    valveHandleMesh.rotation.z = targetRotation; 
+                }
+                
+                if (gateMeshRef) {
+                    const maxLift = 0.4; // Max lift distance to fully clear the pipe
+                    gateMeshRef.position.y = valveOpening * maxLift;
+                }
+
+                // Impeller (V/PumpPower drives rotation speed)
+                const impellerBaseSpeed = 0.1; 
+                scene.traverse(object => {
+                    if (object.userData.impeller) {
+                        object.userData.impeller.rotation.y += pumpPower * impellerBaseSpeed; 
+                    }
+                });
+            } else {
+                 // Keep measurements static while paused
+            }
+
+            updateLabels();
+            renderer.render(scene, camera);
+        }
+
+        function updateLabels() {
+            const tempVector = new THREE.Vector3();
+            scene.traverse(object => {
+                if (object.userData.label) {
+                    object.updateWorldMatrix(true, false);
+                    tempVector.setFromMatrixPosition(object.matrixWorld);
+
+                    tempVector.project(camera);
+
+                    const x = (tempVector.x * 0.5 + 0.5) * container.clientWidth;
+                    const y = (tempVector.y * -0.5 + 0.5) * container.clientHeight;
+
+                    object.userData.label.style.left = `${x}px`;
+                    object.userData.label.style.top = `${y}px`;
+                    
+                    if (tempVector.z > 1 || tempVector.z < -1) {
+                         object.userData.label.style.display = 'none';
+                    } else {
+                         object.userData.label.style.display = 'block';
+                    }
+                }
+            });
+        }
+
+        // --- 5. User Interaction ---
+        function setupInteraction() {
+            // Valve Control
+            valveRange.addEventListener('input', (event) => {
+                valveOpening = parseFloat(event.target.value);
+            });
+
+            // Pump Control
+            pumpPowerRange.addEventListener('input', (event) => {
+                pumpPower = parseFloat(event.target.value);
+            });
+            
+            // Pause/Resume Control
+            pauseButton.addEventListener('click', () => {
+                isPaused = !isPaused;
+                if (isPaused) {
+                    pauseButton.textContent = '继续模拟';
+                    pauseButton.classList.replace('bg-indigo-600', 'bg-green-600');
+                    pauseButton.classList.replace('hover:bg-indigo-700', 'hover:bg-green-700');
+                    controls.enabled = true; 
+                } else {
+                    pauseButton.textContent = '暂停/继续模拟';
+                    pauseButton.classList.replace('bg-green-600', 'bg-indigo-600');
+                    pauseButton.classList.replace('hover:bg-green-700', 'hover:bg-indigo-700');
+                }
+            });
+
+            // Initial setup based on default values
+            valveRange.dispatchEvent(new Event('input'));
+            pumpPowerRange.dispatchEvent(new Event('input'));
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
